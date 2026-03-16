@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>InkOS Book Overview Prototype v2</title>
+    <link rel="icon" href="../../../favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="../../../system/v2/base.css" />
+  </head>
+  <body data-theme="light" data-page="book-overview">
+    <div class="app-shell shell-4">
+      <aside class="global-rail" aria-label="主导航">
+        <div class="rail-stack">
+          <div class="brand-mark" aria-hidden="true"></div>
+          <a class="rail-link" href="../../dashboard/v2/index.html" aria-label="仪表盘"></a>
+          <a class="rail-link" href="../../chief/v2/index.html" aria-label="总编"></a>
+          <a class="rail-link active" href="../../books/v2/index.html" aria-label="书籍"></a>
+          <a class="rail-link" href="../../materials-center/v2/index.html" aria-label="素材"></a>
+          <a class="rail-link" href="../../automation-center/v2/index.html" aria-label="调度"></a>
+          <a class="rail-link" href="../../settings/v2/index.html" aria-label="设置"></a>
+        </div>
+        <div class="theme-stack"></div>
+      </aside>
+
+      <aside class="context-rail">
+        <div class="context-head"></div>
+        <div class="context-scroll stack-8"></div>
+      </aside>
+
+      <section class="workspace">
+        <header class="topbar">
+          <div class="topbar-copy"></div>
+          <div class="topbar-actions"></div>
+        </header>
+        <div class="workspace-scroll">
+          <div class="workspace-inner stack-20"></div>
+        </div>
+      </section>
+
+      <aside class="inspector">
+        <div class="panel-head"></div>
+        <div class="inspector-scroll stack-12"></div>
+      </aside>
+    </div>
+
+    <script src="../../../system/v2/mock-data.js"></script>
+    <script src="../../../system/v2/runtime.js"></script>
+  </body>
+</html>
