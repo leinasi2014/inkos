@@ -21,6 +21,7 @@ export interface LLMMessage {
 export interface LLMClient {
   readonly provider: "openai" | "anthropic";
   readonly apiFormat: "chat" | "responses";
+  readonly baseUrl?: string;
   readonly _openai?: OpenAI;
   readonly _anthropic?: Anthropic;
   readonly defaults: {
@@ -72,6 +73,7 @@ export function createLLMClient(config: LLMConfig): LLMClient {
     return {
       provider: "anthropic",
       apiFormat,
+      baseUrl: baseURL,
       _anthropic: new Anthropic({ apiKey: config.apiKey, baseURL }),
       defaults,
     };
@@ -80,6 +82,7 @@ export function createLLMClient(config: LLMConfig): LLMClient {
   return {
     provider: "openai",
     apiFormat,
+    baseUrl: config.baseUrl,
     _openai: new OpenAI({ apiKey: config.apiKey, baseURL: config.baseUrl }),
     defaults,
   };
@@ -111,6 +114,10 @@ function wrapLLMError(error: unknown): Error {
   return error instanceof Error ? error : new Error(msg);
 }
 
+function shouldUseBufferedOpenAIChat(client: LLMClient): boolean {
+  return client.provider === "openai" && client.apiFormat === "chat" && /open\.bigmodel\.cn/i.test(client.baseUrl ?? "");
+}
+
 // === Simple Chat (used by all agents via BaseAgent.chat()) ===
 
 export async function chatCompletion(
@@ -121,18 +128,23 @@ export async function chatCompletion(
     readonly temperature?: number;
     readonly maxTokens?: number;
     readonly webSearch?: boolean;
+    readonly thinking?: "enabled" | "disabled";
   },
 ): Promise<LLMResponse> {
   try {
     const resolved = {
       temperature: options?.temperature ?? client.defaults.temperature,
       maxTokens: options?.maxTokens ?? client.defaults.maxTokens,
+      thinking: options?.thinking,
     };
     if (client.provider === "anthropic") {
       return await chatCompletionAnthropic(client._anthropic!, model, messages, resolved, client.defaults.thinkingBudget);
     }
     if (client.apiFormat === "responses") {
       return await chatCompletionOpenAIResponses(client._openai!, model, messages, resolved, options?.webSearch);
+    }
+    if (shouldUseBufferedOpenAIChat(client)) {
+      return await chatCompletionOpenAIChatBuffered(client._openai!, model, messages, resolved, options?.webSearch);
     }
     return await chatCompletionOpenAIChat(client._openai!, model, messages, resolved, options?.webSearch);
   } catch (error) {
@@ -163,6 +175,9 @@ export async function chatWithTools(
     if (client.apiFormat === "responses") {
       return await chatWithToolsOpenAIResponses(client._openai!, model, messages, tools, resolved);
     }
+    if (shouldUseBufferedOpenAIChat(client)) {
+      return await chatWithToolsOpenAIChatBuffered(client._openai!, model, messages, tools, resolved);
+    }
     return await chatWithToolsOpenAIChat(client._openai!, model, messages, tools, resolved);
   } catch (error) {
     throw wrapLLMError(error);
@@ -175,7 +190,7 @@ async function chatCompletionOpenAIChat(
   client: OpenAI,
   model: string,
   messages: ReadonlyArray<LLMMessage>,
-  options: { readonly temperature: number; readonly maxTokens: number },
+  options: { readonly temperature: number; readonly maxTokens: number; readonly thinking?: "enabled" | "disabled" },
   webSearch?: boolean,
 ): Promise<LLMResponse> {
   const stream = await client.chat.completions.create({
@@ -187,6 +202,7 @@ async function chatCompletionOpenAIChat(
     temperature: options.temperature,
     max_tokens: options.maxTokens,
     stream: true,
+    ...(options.thinking ? { thinking: { type: options.thinking } as any } : {}),
     ...(webSearch ? { web_search_options: { search_context_size: "medium" as const } } : {}),
   });
 
@@ -212,6 +228,44 @@ async function chatCompletionOpenAIChat(
       promptTokens: inputTokens,
       completionTokens: outputTokens,
       totalTokens: inputTokens + outputTokens,
+    },
+  };
+}
+
+async function chatCompletionOpenAIChatBuffered(
+  client: OpenAI,
+  model: string,
+  messages: ReadonlyArray<LLMMessage>,
+  options: { readonly temperature: number; readonly maxTokens: number; readonly thinking?: "enabled" | "disabled" },
+  webSearch?: boolean,
+): Promise<LLMResponse> {
+  const response = await client.chat.completions.create({
+    model,
+    messages: messages.map((m) => ({
+      role: m.role,
+      content: m.content,
+    })),
+    temperature: options.temperature,
+    max_tokens: options.maxTokens,
+    stream: false,
+    ...(options.thinking ? { thinking: { type: options.thinking } as any } : {}),
+    ...(webSearch ? { web_search_options: { search_context_size: "medium" as const } } : {}),
+  });
+
+  const rawContent = response.choices[0]?.message?.content as unknown;
+  const content = typeof rawContent === "string"
+    ? rawContent
+      : Array.isArray(rawContent)
+      ? rawContent.map((item: { text?: string }) => item.text ?? "").join("")
+      : "";
+  if (!content) throw new Error("LLM returned empty response");
+
+  return {
+    content,
+    usage: {
+      promptTokens: response.usage?.prompt_tokens ?? 0,
+      completionTokens: response.usage?.completion_tokens ?? 0,
+      totalTokens: response.usage?.total_tokens ?? 0,
     },
   };
 }
@@ -268,6 +322,45 @@ async function chatWithToolsOpenAIChat(
   return { content, toolCalls };
 }
 
+async function chatWithToolsOpenAIChatBuffered(
+  client: OpenAI,
+  model: string,
+  messages: ReadonlyArray<AgentMessage>,
+  tools: ReadonlyArray<ToolDefinition>,
+  options: { readonly temperature: number; readonly maxTokens: number },
+): Promise<ChatWithToolsResult> {
+  const openaiMessages = agentMessagesToOpenAIChat(messages);
+  const openaiTools: OpenAI.Chat.Completions.ChatCompletionTool[] = tools.map((t) => ({
+    type: "function" as const,
+    function: {
+      name: t.name,
+      description: t.description,
+      parameters: t.parameters,
+    },
+  }));
+
+  const response = await client.chat.completions.create({
+    model,
+    messages: openaiMessages,
+    tools: openaiTools,
+    temperature: options.temperature,
+    max_tokens: options.maxTokens,
+    stream: false,
+  });
+
+  const message = response.choices[0]?.message;
+  const toolCalls: ToolCall[] = (message?.tool_calls ?? []).map((toolCall) => ({
+    id: toolCall.id,
+    name: toolCall.function.name,
+    arguments: toolCall.function.arguments,
+  }));
+
+  return {
+    content: message?.content ?? "",
+    toolCalls,
+  };
+}
+
 function agentMessagesToOpenAIChat(
   messages: ReadonlyArray<AgentMessage>,
 ): OpenAI.Chat.Completions.ChatCompletionMessageParam[] {
@@ -315,7 +408,7 @@ async function chatCompletionOpenAIResponses(
   client: OpenAI,
   model: string,
   messages: ReadonlyArray<LLMMessage>,
-  options: { readonly temperature: number; readonly maxTokens: number },
+  options: { readonly temperature: number; readonly maxTokens: number; readonly thinking?: "enabled" | "disabled" },
   webSearch?: boolean,
 ): Promise<LLMResponse> {
   const input: OpenAI.Responses.ResponseInputItem[] = messages.map((m) => ({
