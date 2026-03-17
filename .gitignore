@@ -7,3 +7,20 @@ dist/
 .DS_Store
 coverage/
 .turbo/
+.plane-cli
+output
+
+# Runtime / temp
+.inkos-ui/
+.playwright-cli/
+.tmp/
+
+# AI review notes
+gemini-review.txt
+
+# Claude Code local data
+.claude/
+
+# Next.js
+.next/
+*.tsbuildinfo
