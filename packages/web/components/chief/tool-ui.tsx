@@ -1,6 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
+import { Button } from "../ui/button";
 import { useEffect, useMemo, useState } from "react";
 import { getDraft, getResource, getRun } from "../../lib/api";
 import type { DraftArtifact, RunRecord, ToolAction, ToolPresentation } from "../../lib/contracts";
@@ -143,7 +144,7 @@ export function StandaloneToolCard({ args, liveVersion = 0 }: { args: ToolArgs; 
       } else if (action.type === "reject") {
         await sendCommand({
           commandId: createCommandId(),
-          command: "cancel_action",
+          command: "reject_action",
           payload: {
             threadId: args.threadId,
             runId: args.runId,
@@ -174,6 +175,8 @@ export function StandaloneToolCard({ args, liveVersion = 0 }: { args: ToolArgs; 
           command: "discard_draft",
           payload: {
             draftId: draft.draftId,
+            revision: draft.revision,
+            etag: draft.etag,
           },
         });
       } else if (action.type === "regenerate" && draft) {
@@ -182,6 +185,8 @@ export function StandaloneToolCard({ args, liveVersion = 0 }: { args: ToolArgs; 
           command: "regenerate_draft",
           payload: {
             draftId: draft.draftId,
+            revision: draft.revision,
+            etag: draft.etag,
             instruction: "让候选更贴近当前卷冲突",
           },
         });
@@ -266,17 +271,28 @@ export function StandaloneToolCard({ args, liveVersion = 0 }: { args: ToolArgs; 
       />
       {actionError ? <p className="subtle" role="alert">{actionError}</p> : null}
       <div className="tool-actions">
-        {(tool.actions ?? []).map((action) => (
-          <button
-            key={action.actionId}
-            type="button"
-            className={`button ${action.type === "approve" || action.type === "apply" || action.type === "submit" ? "primary" : action.type === "reject" || action.type === "discard" ? "danger" : ""}`.trim()}
-            onClick={() => void handleAction(action)}
-            disabled={(materialEditMode && action.type !== "navigate") || ((!canWrite && action.type !== "navigate") || isReadonlyAction(action, run, draft))}
-          >
-            {action.label}
-          </button>
-        ))}
+        {(tool.actions ?? []).map((action) => {
+          // 使用 shadcn Button 组件替代原生 button
+          const variant =
+            action.type === "approve" || action.type === "apply" || action.type === "submit"
+              ? "default"
+              : action.type === "reject" || action.type === "discard"
+                ? "destructive"
+                : "outline";
+
+          return (
+            <Button
+              key={action.actionId}
+              type="button"
+              variant={variant}
+              size="sm"
+              onClick={() => void handleAction(action)}
+              disabled={(materialEditMode && action.type !== "navigate") || ((!canWrite && action.type !== "navigate") || isReadonlyAction(action, run, draft))}
+            >
+              {action.label}
+            </Button>
+          );
+        })}
       </div>
     </article>
   );

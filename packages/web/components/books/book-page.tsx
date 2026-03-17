@@ -10,6 +10,15 @@ import { WorkbenchHeader } from "../chrome/workbench-header";
 import { ErrorPanel } from "../common/error-panel";
 import { LoadingPanel } from "../common/loading-panel";
 import { BookContextNav } from "./book-context-nav";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../ui/card";
+import { Badge } from "../ui/badge";
+import { Button } from "../ui/button";
+
+// 审计状态映射到 Badge variant
+function getAuditVariant(status: string): "default" | "secondary" | "destructive" | "outline" {
+  if (status === "passed") return "secondary";
+  return "outline";
+}
 
 export function BookPage({ bookId }: { bookId: string }) {
   const [book, setBook] = useState<BookRecord | null>(null);
@@ -41,6 +50,7 @@ export function BookPage({ bookId }: { bookId: string }) {
 
   useLiveEvents({
     enabled: Boolean(bookId),
+    threadIds: [buildBookThreadId(bookId, "write"), buildBookThreadId(bookId, "materials")],
     isRelevant: (event) => event.threadId.includes(bookId) || String(event.payload.bookId ?? "") === bookId,
     onEvent: () => {
       if (scheduleRef.current) return;
@@ -59,89 +69,114 @@ export function BookPage({ bookId }: { bookId: string }) {
   }, []);
 
   return (
-    <div className="page-shell">
+    <div className="space-y-4">
       <WorkbenchHeader
         eyebrow="Book Overview"
         title={book?.title ?? "书籍总览"}
         description={book?.summary ?? "正在加载书籍信息。"}
         actions={
-          <div className="button-row">
-            <Link className="button primary" href={getChiefHref(buildBookThreadId(bookId, "write"))}>
-              打开 /chief
-            </Link>
-            <Link className="button" href={getBookMaterialsHref(bookId)}>
-              素材中心
-            </Link>
+          <div className="flex gap-2">
+            <Button asChild><Link href={getChiefHref(buildBookThreadId(bookId, "write"))}>打开 /chief</Link></Button>
+            <Button asChild variant="outline"><Link href={getBookMaterialsHref(bookId)}>素材中心</Link></Button>
           </div>
         }
       />
       {loading ? <LoadingPanel title="加载书籍总览中..." /> : null}
       {error ? <ErrorPanel description={error} /> : null}
       {!loading && !error && book ? (
-        <div className="books-layout">
-          <section className="thread-main">
-            <section className="metric-grid">
-              <article className="metric-card">
-                <div>当前章节</div>
-                <div className="metric-value">{book.currentChapter}</div>
-              </article>
-              <article className="metric-card">
-                <div>Materials</div>
-                <div className="metric-value">{book.metrics.materials}</div>
-              </article>
-              <article className="metric-card">
-                <div>Truth 问题</div>
-                <div className="metric-value">{book.metrics.truthIssues}</div>
-              </article>
+        <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_320px] gap-4">
+          <section className="space-y-4">
+            {/* 统计卡片 - 使用 shadcn Card */}
+            <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+              <Card>
+                <CardHeader className="pb-2">
+                  <CardDescription>当前章节</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <div className="text-2xl font-bold">{book.currentChapter}</div>
+                </CardContent>
+              </Card>
+              <Card>
+                <CardHeader className="pb-2">
+                  <CardDescription>Materials</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <div className="text-2xl font-bold">{book.metrics.materials}</div>
+                </CardContent>
+              </Card>
+              <Card>
+                <CardHeader className="pb-2">
+                  <CardDescription>Truth 问题</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <div className="text-2xl font-bold">{book.metrics.truthIssues}</div>
+                </CardContent>
+              </Card>
             </section>
-            <section className="panel">
-              <div className="panel-head">
-                <div>
-                  <p className="eyebrow">Chapters</p>
-                  <h2 className="section-title">章节列表</h2>
+
+            {/* 章节列表 - 使用 Card + Table */}
+            <Card>
+              <CardHeader>
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <p className="text-xs text-muted-foreground uppercase tracking-wider">Chapters</p>
+                    <CardTitle className="text-lg">章节列表</CardTitle>
+                  </div>
+                  <Badge variant="secondary">{chapters.length} chapters</Badge>
                 </div>
-                <div className="status-pill active">{chapters.length} chapters</div>
-              </div>
-              <div className="table-list">
+              </CardHeader>
+              <CardContent className="space-y-2">
                 {chapters.map((chapter) => (
-                  <Link key={chapter.chapterNumber} href={getBookChapterHref(bookId, chapter.chapterNumber)} className="table-row link-row">
+                  <Link
+                    key={chapter.chapterNumber}
+                    href={getBookChapterHref(bookId, chapter.chapterNumber)}
+                    className="grid grid-cols-[minmax(0,1fr)_auto_auto] gap-3 items-center p-3 -mx-2 rounded-md transition-colors hover:bg-accent/50"
+                  >
                     <div>
-                      <strong>
+                      <div className="font-medium">
                         第{chapter.chapterNumber}章 {chapter.title}
-                      </strong>
-                      <p>{chapter.status}</p>
+                      </div>
+                      <p className="text-sm text-muted-foreground">{chapter.status}</p>
                     </div>
-                    <div>
-                      <span className={`status-pill ${chapter.auditStatus === "passed" ? "success" : "warning"}`}>{chapter.auditStatus}</span>
-                    </div>
-                    <div>
-                      <span className="subtle">{chapter.wordCount} 字</span>
-                    </div>
+                    <Badge variant={getAuditVariant(chapter.auditStatus)}>{chapter.auditStatus}</Badge>
+                    <div className="text-sm text-muted-foreground">{chapter.wordCount} 字</div>
                   </Link>
                 ))}
-              </div>
-            </section>
-            <section className="panel">
-              <div className="panel-head">
-                <div>
-                  <p className="eyebrow">Truth Files</p>
-                  <h2 className="section-title">事实文件</h2>
-                </div>
-                <Link className="button" href={getBookTruthHref(bookId)}>
-                  打开 Truth Center
-                </Link>
-              </div>
-              <div className="quick-link-grid">
-                {truthFiles.map((item) => (
-                  <div key={item.fileName} className="mini-card">
-                    <strong>{item.fileName}</strong>
-                    <p>{item.note}</p>
+              </CardContent>
+            </Card>
+
+            {/* Truth Files - 使用 Card */}
+            <Card>
+              <CardHeader>
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <p className="text-xs text-muted-foreground uppercase tracking-wider">Truth Files</p>
+                    <CardTitle className="text-lg">事实文件</CardTitle>
                   </div>
-                ))}
-              </div>
-            </section>
+                  <Button asChild variant="outline" size="sm">
+                    <Link href={getBookTruthHref(bookId)}>打开 Truth Center</Link>
+                  </Button>
+                </div>
+              </CardHeader>
+              <CardContent>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {truthFiles.map((item) => (
+                    <Card key={item.fileName}>
+                      <CardHeader className="pb-2">
+                        <CardTitle className="text-sm">{item.fileName}</CardTitle>
+                      </CardHeader>
+                      <CardContent className="pt-0">
+                        <p className="text-sm text-muted-foreground line-clamp-2">{item.note}</p>
+                      </CardContent>
+                    </Card>
+                  ))}
+                </div>
+              </CardContent>
+            </Card>
           </section>
-          <aside className="inspector-stack">
+
+          {/* 侧边栏 */}
+          <aside className="space-y-4">
             <BookContextNav book={book} />
           </aside>
         </div>

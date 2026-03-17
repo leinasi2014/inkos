@@ -47,6 +47,7 @@ export function ChiefPage({ initialThreadId }: { initialThreadId?: string }) {
 
   useLiveEvents({
     enabled: Boolean(selectedThreadId),
+    threadIds: selectedThreadId ? [selectedThreadId] : [],
     isRelevant: (event) => event.threadId === selectedThreadId,
     onEvent: () => {
       if (scheduleRef.current) return;
