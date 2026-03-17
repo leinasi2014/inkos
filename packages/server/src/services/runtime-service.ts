@@ -10,6 +10,7 @@ import {
   discardDraft,
   editDraft,
   handleUserMessage,
+  rejectAction,
   regenerateDraft,
   submitForm,
 } from "./runtime-flows.js";
@@ -23,19 +24,20 @@ type WebSocketLike = {
 };
 
 export class RuntimeService {
-  private readonly clients = new Set<WebSocketLike>();
+  // 按 threadId 建立订阅表，避免不同线程事件继续全量广播给所有连接。
+  private readonly subscriptions = new Map<WebSocketLike, Set<string> | null>();
 
   constructor(
     readonly store: DatabaseStore,
     readonly llm: RuntimeLLM | null = null,
   ) {}
 
-  addClient(socket: WebSocketLike): void {
-    this.clients.add(socket);
+  subscribeClient(socket: WebSocketLike, threadIds: ReadonlyArray<string>): void {
+    this.subscriptions.set(socket, threadIds.length > 0 ? new Set(threadIds) : null);
   }
 
   removeClient(socket: WebSocketLike): void {
-    this.clients.delete(socket);
+    this.subscriptions.delete(socket);
   }
 
   listThreads(filters?: { scope?: string; bookId?: string }) {
@@ -53,20 +55,17 @@ export class RuntimeService {
   }
 
   listBooks() {
-    for (const book of this.store.listBooks()) {
-      this.syncBookDerivedState(book.id);
-    }
     return this.store.listBooks();
   }
 
   getBook(bookId: string) {
-    this.syncBookDerivedState(bookId);
     const book = this.store.getBook(bookId);
     if (!book) throw new InkOSError("RUN.NOT_FOUND", `Book ${bookId} 不存在`, { statusCode: 404 });
     return book;
   }
 
   syncBookDerivedState(bookId: string): void {
+    // 派生指标只在写路径同步，避免 GET 接口读取时反向触发写库。
     const book = this.store.getBook(bookId);
     if (!book) return;
 
@@ -135,16 +134,22 @@ export class RuntimeService {
     return resource;
   }
 
-  replayAfter(lastCursor: number): EventEnvelope[] {
-    return this.store.listEventsAfter(lastCursor).map((event) => ({
-      type: "event",
-      eventId: event.eventId,
-      event: event.event,
-      runId: event.runId,
-      threadId: event.threadId,
-      cursor: event.cursor,
-      payload: event.payload,
-    }));
+  replayAfter(lastCursor: number, threadIds: ReadonlyArray<string> = [], limit = 100): { events: EventEnvelope[]; nextCursor?: number } {
+    const normalizedLimit = Math.max(1, limit);
+    const records = this.store.listEventsAfter(lastCursor, normalizedLimit + 1, threadIds);
+    const page = records.slice(0, normalizedLimit);
+    return {
+      events: page.map((event) => ({
+        type: "event",
+        eventId: event.eventId,
+        event: event.event,
+        runId: event.runId,
+        threadId: event.threadId,
+        cursor: event.cursor,
+        payload: event.payload,
+      })),
+      ...(records.length > normalizedLimit && page.length > 0 ? { nextCursor: page[page.length - 1]?.cursor } : {}),
+    };
   }
 
   async handleRawCommand(raw: unknown): Promise<AckEnvelope> {
@@ -164,21 +169,25 @@ export class RuntimeService {
         return submitForm(this, envelope.commandId, envelope.payload.runId, envelope.payload.threadId, envelope.payload.formData);
       case "approve_action":
         return approveAction(this, envelope.commandId, envelope.payload.runId, envelope.payload.threadId, envelope.payload.approvalId);
+      case "reject_action":
+        return rejectAction(this, envelope.commandId, envelope.payload.runId, envelope.payload.threadId);
       case "cancel_action":
         return cancelAction(this, envelope.commandId, envelope.payload.runId, envelope.payload.threadId);
       case "apply_draft":
         return applyDraft(this, envelope.commandId, envelope.payload.draftId, envelope.payload.revision, envelope.payload.etag);
       case "discard_draft":
-        return discardDraft(this, envelope.commandId, envelope.payload.draftId);
+        return discardDraft(this, envelope.commandId, envelope.payload.draftId, envelope.payload.revision, envelope.payload.etag);
       case "edit_draft":
         return editDraft(this, envelope.commandId, envelope.payload.draftId, envelope.payload.revision, envelope.payload.etag, envelope.payload.changes);
       case "regenerate_draft":
-        return regenerateDraft(this, envelope.commandId, envelope.payload.draftId, envelope.payload.instruction);
+        return regenerateDraft(this, envelope.commandId, envelope.payload.draftId, envelope.payload.revision, envelope.payload.etag, envelope.payload.instruction);
       case "cancel_run":
         return cancelRun(this, envelope.commandId, envelope.payload.runId);
       case "resume":
         return { type: "ack", commandId: envelope.commandId, success: true };
     }
+
+    throw new InkOSError("COMMAND.UNSUPPORTED", "不支持的命令类型。", { statusCode: 400 });
   }
 
   emitEvent(runId: string, threadId: string, event: string, payload: unknown): void {
@@ -197,8 +206,8 @@ export class RuntimeService {
     };
 
     const serialized = JSON.stringify(envelope);
-    for (const client of this.clients) {
-      if (client.readyState === 1) {
+    for (const [client, threadIds] of this.subscriptions) {
+      if (client.readyState === 1 && (!threadIds || threadIds.has(threadId))) {
         client.send(serialized);
       }
     }

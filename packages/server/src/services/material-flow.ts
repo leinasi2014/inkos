@@ -1,3 +1,4 @@
+import { InkOSError } from "../errors.js";
 import type { AckEnvelope, DraftArtifact, MaterialRecord, RunRecord, ThreadRecord, ToolPresentation } from "../contracts.js";
 import { createId, nowIso, weakEtag } from "../id.js";
 import type { RuntimeFlowDeps } from "./runtime-flows.js";
@@ -107,7 +108,8 @@ export function submitMaterialForm(
 ): AckEnvelope {
   const payload = currentTool.previewPayload as Record<string, unknown>;
   const type = normalizeMaterialType(payload.type);
-  const bookId = thread.bookId ?? "book_001";
+  // 素材草案会落 draft/material/truth，缺 bookId 时必须直接拒绝，不能再偷偷写进默认书。
+  const bookId = requireThreadBookId(thread, "素材生成");
   const now = nowIso();
   const preview = buildMaterialPreview(deps, bookId, type, toStringMap(formData));
   const draft: DraftArtifact = {
@@ -266,9 +268,12 @@ export function regenerateMaterialDraft(
   deps: RuntimeFlowDeps,
   commandId: string,
   draftId: string,
+  revision: number,
+  etag: string,
   instruction?: string,
 ): AckEnvelope {
   const draft = deps.getDraft(draftId);
+  ensureDraftVersion(draft, revision, etag);
   const preview = draft.preview as MaterialPreview;
   const regenerated = buildMaterialPreview(deps, draft.bookId, normalizeMaterialType(draft.type), preview.formDefaults, instruction);
   const nextDraft: DraftArtifact = {
@@ -421,4 +426,11 @@ function normalizeMaterialType(value: unknown): MaterialType {
 
 function toStringMap(input: Record<string, unknown>): Record<string, string> {
   return Object.fromEntries(Object.entries(input).map(([key, value]) => [key, String(value ?? "")]));
+}
+
+function requireThreadBookId(thread: ThreadRecord, actionLabel: string): string {
+  if (!thread.bookId) {
+    throw new InkOSError("COMMAND.BOOK_CONTEXT_REQUIRED", `${actionLabel} 需要绑定 bookId 的线程上下文。`, { statusCode: 400 });
+  }
+  return thread.bookId;
 }

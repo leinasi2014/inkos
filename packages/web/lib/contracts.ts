@@ -34,6 +34,8 @@ export interface ToolPresentation {
 export interface RunRecord {
   runId: string;
   threadId: string;
+  bookId?: string;
+  chapterNumber?: number;
   status: "planning" | "executing" | "awaiting_approval" | "completed" | "failed" | "cancelled";
   startedAt: string;
   endedAt?: string;
@@ -174,6 +176,7 @@ export interface CommandAck {
   commandId: string;
   success: true;
   runId?: string;
+  nextCursor?: number;
 }
 
 export interface EventEnvelope {
@@ -238,7 +241,6 @@ export interface AutomationOverview {
 export interface SettingsOverview {
   llm: {
     provider: string;
-    baseUrl: string;
     model: string;
     fallbackModel: string;
     hasApiKey: boolean;

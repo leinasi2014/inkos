@@ -12,15 +12,31 @@
   },
   "dependencies": {
     "@assistant-ui/react": "^0.12.17",
+    "@assistant-ui/react-markdown": "^0.12.5",
+    "@assistant-ui/react-ui": "^0.2.1",
+    "@radix-ui/react-dialog": "^1.1.15",
+    "@radix-ui/react-dropdown-menu": "^2.1.16",
+    "@radix-ui/react-separator": "^1.1.8",
+    "@radix-ui/react-slot": "^1.2.4",
+    "@radix-ui/react-tabs": "^1.1.13",
+    "@radix-ui/react-tooltip": "^1.2.8",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.577.0",
     "next": "^15.2.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "tailwind-merge": "^3.5.0",
     "zustand": "^5.0.3"
   },
   "devDependencies": {
+    "@tailwindcss/postcss": "^4.2.1",
     "@types/node": "^22.13.10",
     "@types/react": "^19.0.10",
     "@types/react-dom": "^19.0.4",
+    "postcss": "^8.5.8",
+    "tailwindcss": "^4.2.1",
+    "tailwindcss-animate": "^1.0.7",
     "typescript": "^5.8.0",
     "vitest": "^3.0.0"
   }

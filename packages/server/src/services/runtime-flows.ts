@@ -17,6 +17,7 @@ import {
   createAuditReportTool,
   createRunRecord,
   createSkillRef,
+  createTextResource,
   createToolPresentation,
   ensureDraftVersion,
 } from "./runtime-internals.js";
@@ -54,6 +55,7 @@ export async function handleUserMessage(deps: RuntimeFlowDeps, commandId: string
 
 export function submitForm(deps: RuntimeFlowDeps, commandId: string, runId: string, threadId: string, formData: Record<string, unknown>): AckEnvelope {
   const run = deps.getRun(runId);
+  assertRunThreadBinding(run, threadId);
   const thread = deps.getThread(threadId);
   const currentTool = run.toolPresentations[run.toolPresentations.length - 1];
 
@@ -68,15 +70,22 @@ export function submitForm(deps: RuntimeFlowDeps, commandId: string, runId: stri
 
 export function approveAction(deps: RuntimeFlowDeps, commandId: string, runId: string, threadId: string, approvalId: string): AckEnvelope {
   const run = deps.getRun(runId);
+  assertRunThreadBinding(run, threadId);
   if (approvalId !== run.pendingApprovalId) {
     throw new InkOSError("COMMAND.INVALID_PAYLOAD", "approvalId 不匹配", { statusCode: 400 });
   }
-  if (run.currentStepId === "confirm_plan") return completeCreateBookRun(deps, commandId, run, threadId);
-  return completeWriteRun(deps, commandId, run, threadId);
+  if (run.currentStepId === "confirm_plan") return completeCreateBookRun(deps, commandId, run);
+  return completeWriteRun(deps, commandId, run);
+}
+
+export function rejectAction(deps: RuntimeFlowDeps, commandId: string, runId: string, threadId: string): AckEnvelope {
+  // reject 是明确的业务动作，不能再让前端偷映射成 cancel_action。
+  return cancelAction(deps, commandId, runId, threadId);
 }
 
 export function cancelAction(deps: RuntimeFlowDeps, commandId: string, runId: string, threadId: string): AckEnvelope {
   const run = deps.getRun(runId);
+  assertRunThreadBinding(run, threadId);
   const currentTool = run.toolPresentations[run.toolPresentations.length - 1];
   if (run.currentStepId === "confirm_plan" && currentTool?.toolName === "chief.plan") {
     const payload = currentTool.previewPayload as Record<string, unknown>;
@@ -156,8 +165,9 @@ export function applyDraft(deps: RuntimeFlowDeps, commandId: string, draftId: st
   return { type: "ack", commandId, success: true, runId: nextDraft.sourceRunId };
 }
 
-export function discardDraft(deps: RuntimeFlowDeps, commandId: string, draftId: string): AckEnvelope {
+export function discardDraft(deps: RuntimeFlowDeps, commandId: string, draftId: string, revision: number, etag: string): AckEnvelope {
   const draft = deps.getDraft(draftId);
+  ensureDraftVersion(draft, revision, etag);
   const nextDraft: DraftArtifact = {
     ...draft,
     status: "discarded",
@@ -209,11 +219,12 @@ export function editDraft(
   return { type: "ack", commandId, success: true, runId: nextDraft.sourceRunId };
 }
 
-export function regenerateDraft(deps: RuntimeFlowDeps, commandId: string, draftId: string, instruction?: string): AckEnvelope {
+export function regenerateDraft(deps: RuntimeFlowDeps, commandId: string, draftId: string, revision: number, etag: string, instruction?: string): AckEnvelope {
   const draft = deps.getDraft(draftId);
   if (draft.skillRef.skillId === "material.generator") {
-    return regenerateMaterialDraft(deps, commandId, draftId, instruction);
+    return regenerateMaterialDraft(deps, commandId, draftId, revision, etag, instruction);
   }
+  ensureDraftVersion(draft, revision, etag);
   const preview = draft.preview as Record<string, unknown>;
   const nextDraft: DraftArtifact = {
     ...draft,
@@ -270,13 +281,29 @@ function startCreateBookRun(deps: RuntimeFlowDeps, commandId: string, thread: Th
 }
 
 function startWriteRun(deps: RuntimeFlowDeps, commandId: string, thread: ThreadRecord): AckEnvelope {
+  const bookId = requireThreadBookId(thread, "写作");
+  const book = deps.store.getBook(bookId);
+  if (!book) {
+    throw new InkOSError("RUN.NOT_FOUND", `Book ${bookId} 不存在`, { statusCode: 404 });
+  }
+  // currentChapter 表示当前正在推进的目标章节；被审计的是上一章，需要显式拆开。
+  const writingChapterNumber = book.currentChapter;
+  const currentChapterNumber = Math.max(1, writingChapterNumber - 1);
+  const nextTargetChapterNumber = writingChapterNumber + 1;
+  const auditResource = createTextResource(
+    `审计详情：第${currentChapterNumber}章人物位置和阵纹触发时序冲突，建议先完成修订，再推进第${writingChapterNumber}章。`,
+  );
+  deps.store.saveResource(auditResource);
   const run = createRunRecord(thread.threadId, {
+    bookId,
+    // run 绑定的是被审计章节，读模型据此才能准确找到对应审计记录。
+    chapterNumber: currentChapterNumber,
     status: "awaiting_approval",
     currentStepId: "approval_gate",
     stepCount: 3,
     estimatedDuration: 180,
     pendingApprovalId: createId("approval"),
-    summary: "writer 和 auditor 已跑完，当前需要你决定是否按修订建议继续写第13章。",
+    summary: `writer 和 auditor 已跑完，当前需要你决定是否按修订建议继续写第${writingChapterNumber}章。`,
     skillsLocked: {
       writer: createSkillRef("chief.writer"),
       auditor: createSkillRef("chief.auditor"),
@@ -288,13 +315,18 @@ function startWriteRun(deps: RuntimeFlowDeps, commandId: string, thread: ThreadR
     run.runId,
     "chief.worker-trace",
     {
+      chapterNumber: currentChapterNumber,
       progress: 72,
       checkpoints: [
         { label: "Writer", status: "completed" },
         { label: "Auditor", status: "completed" },
         { label: "Reviser", status: "awaiting_approval" },
       ],
-      liveNotes: ["writer 已产出第13章草稿", "auditor 发现第12章衔接冲突", "reviser 等待你确认修订策略"],
+      liveNotes: [
+        `writer 已产出第${writingChapterNumber}章草稿`,
+        `auditor 发现第${currentChapterNumber}章衔接冲突`,
+        `reviser 等待你确认第${writingChapterNumber}章修订策略，下一章目标会推进到第${nextTargetChapterNumber}章`,
+      ],
     },
     [{ actionId: createId("cancel"), type: "cancel", label: "取消执行", confirmRequired: true, riskLevel: "medium" }],
   );
@@ -303,16 +335,24 @@ function startWriteRun(deps: RuntimeFlowDeps, commandId: string, thread: ThreadR
     run.runId,
     "chief.approval-request",
     {
-      title: "是否按修订建议继续第13章？",
-      blockedBy: "第12章人物位置和阵纹触发时序存在冲突，若直接续写会扩大返工范围。",
+      chapterNumber: currentChapterNumber,
+      title: `是否按修订建议继续第${writingChapterNumber}章？`,
+      blockedBy: `第${currentChapterNumber}章人物位置和阵纹触发时序存在冲突，若直接续写会扩大返工范围。`,
       riskLevel: "medium",
-      impact: "会更新第13章草稿和 truth 摘要",
+      impact: `会更新第${writingChapterNumber}章草稿，并把下一章目标推进到第${nextTargetChapterNumber}章`,
     },
     [
       { actionId: run.pendingApprovalId!, type: "approve", label: "批准继续" },
       { actionId: createId("reject"), type: "reject", label: "拒绝并停止" },
-      { actionId: createId("nav"), type: "navigate", label: "查看审计详情", navigateTo: "/books/book_001" },
+      { actionId: createId("nav"), type: "navigate", label: "查看审计详情", navigateTo: `/books/${bookId}` },
     ],
+    {
+      resourceRef: {
+        refId: auditResource.refId,
+        type: auditResource.type,
+        uri: auditResource.uri,
+      },
+    },
   );
 
   deps.store.saveRun({ ...run, toolPresentations: [traceTool, approvalTool] });
@@ -324,7 +364,7 @@ function startWriteRun(deps: RuntimeFlowDeps, commandId: string, thread: ThreadR
 }
 
 function startAuditDiagnosticRun(deps: RuntimeFlowDeps, commandId: string, thread: ThreadRecord, content: string): AckEnvelope {
-  const bookId = thread.bookId ?? "book_001";
+  const bookId = requireThreadBookId(thread, "审计诊断");
   const chapterMatch = content.match(/第\s*(\d+)\s*章/);
   const book = deps.store.getBook(bookId);
   const chapterNumber = chapterMatch ? Number(chapterMatch[1]) : Math.max(1, (book?.currentChapter ?? 1) - 1);
@@ -400,7 +440,8 @@ async function buildQuickReplySummary(deps: RuntimeFlowDeps, thread: ThreadRecor
   }
 }
 
-function completeCreateBookRun(deps: RuntimeFlowDeps, commandId: string, run: RunRecord, threadId: string): AckEnvelope {
+function completeCreateBookRun(deps: RuntimeFlowDeps, commandId: string, run: RunRecord): AckEnvelope {
+  const threadId = run.threadId;
   const planTool = run.toolPresentations.find((tool) => tool.toolName === "chief.plan");
   const payload = (planTool?.previewPayload ?? {}) as Record<string, unknown>;
   const bookConfig = (payload.bookConfig ?? {}) as Record<string, unknown>;
@@ -508,38 +549,47 @@ function completeCreateBookRun(deps: RuntimeFlowDeps, commandId: string, run: Ru
   return { type: "ack", commandId, success: true, runId: run.runId };
 }
 
-function completeWriteRun(deps: RuntimeFlowDeps, commandId: string, run: RunRecord, threadId: string): AckEnvelope {
+function completeWriteRun(deps: RuntimeFlowDeps, commandId: string, run: RunRecord): AckEnvelope {
+  const threadId = run.threadId;
   const thread = deps.getThread(threadId);
-  const bookId = thread.bookId ?? "book_001";
+  const bookId = requireThreadBookId(thread, "写作落库");
   const current = deps.store.getBook(bookId);
-  const nextChapterNumber = current ? current.currentChapter + 1 : 1;
+  if (!current) {
+    throw new InkOSError("RUN.NOT_FOUND", `Book ${bookId} 不存在`, { statusCode: 404 });
+  }
+  // 先把当前 run 正在写的章节落库，再把 book.currentChapter 推进到下一章目标。
+  const writtenChapterNumber = current.currentChapter;
+  const nextTargetChapterNumber = writtenChapterNumber + 1;
   const updatedAt = nowIso();
-  if (current) {
-    deps.store.saveBook({
-      ...current,
-      currentChapter: nextChapterNumber,
-      progressLabel: `${nextChapterNumber} / ${current.targetChapter} 章`,
-      nextAction: `回看第${nextChapterNumber}章草稿，并决定是否进入下一轮审计修订。`,
+  const auditedChapter = deps.store.getChapter(bookId, Math.max(1, writtenChapterNumber - 1));
+  if (auditedChapter) {
+    // 审批通过并完成落库后，被审计章节要回写成 passed，读模型才不会一直停在 pending/failed。
+    deps.store.saveChapter({
+      ...auditedChapter,
+      auditStatus: "passed",
       updatedAt,
     });
   }
+  deps.store.saveBook({
+    ...current,
+    currentChapter: nextTargetChapterNumber,
+    progressLabel: `${nextTargetChapterNumber} / ${current.targetChapter} 章`,
+    nextAction: `回看第${writtenChapterNumber}章草稿，并决定是否推进到第${nextTargetChapterNumber}章。`,
+    updatedAt,
+  });
 
-  const existingChapter = deps.store.getChapter(bookId, nextChapterNumber);
-  if (!existingChapter) {
-    const createdAt = updatedAt;
-    const nextChapter: ChapterRecord = {
-      bookId,
-      chapterNumber: nextChapterNumber,
-      title: `第${nextChapterNumber}章 断崖后的回火`,
-      status: "ready",
-      wordCount: 2860,
-      auditStatus: "pending",
-      content: `第${nextChapterNumber}章草稿已由写作闭环落库。当前版本聚焦师徒矛盾、断崖追逐和旧宗门暗线的第一次正面咬合。`,
-      createdAt,
-      updatedAt: createdAt,
-    };
-    deps.store.saveChapter(nextChapter);
-  }
+  const existingChapter = deps.store.getChapter(bookId, writtenChapterNumber);
+  deps.store.saveChapter({
+    bookId,
+    chapterNumber: writtenChapterNumber,
+    title: `第${writtenChapterNumber}章 断崖后的回火`,
+    status: "ready",
+    wordCount: 2860,
+    auditStatus: "pending",
+    content: `第${writtenChapterNumber}章草稿已由写作闭环落库。当前版本聚焦师徒矛盾、断崖追逐和旧宗门暗线的第一次正面咬合。`,
+    createdAt: existingChapter?.createdAt ?? updatedAt,
+    updatedAt,
+  });
 
   const traceTool = createToolPresentation(
     run.runId,
@@ -552,9 +602,9 @@ function completeWriteRun(deps: RuntimeFlowDeps, commandId: string, run: RunReco
         { label: "Reviser", status: "completed" },
       ],
       liveNotes: [
-        `第${nextChapterNumber}章草稿已落库`,
+        `第${writtenChapterNumber}章草稿已落库`,
         "审计阻塞点已按审批意见处理",
-        "章节工作台与书籍进度已同步刷新",
+        `章节工作台与书籍进度已同步刷新，下一章目标为第${nextTargetChapterNumber}章`,
       ],
     },
     [],
@@ -567,7 +617,7 @@ function completeWriteRun(deps: RuntimeFlowDeps, commandId: string, run: RunReco
     pendingApprovalId: undefined,
     currentStepId: "completed",
     lastPersistedAt: updatedAt,
-    summary: `已按修订建议继续执行，第${nextChapterNumber}章草稿和书籍进度都已刷新。`,
+    summary: `已按修订建议继续执行，第${writtenChapterNumber}章草稿已落库，下一章目标已推进到第${nextTargetChapterNumber}章。`,
     toolPresentations: [traceTool],
   };
   deps.store.saveRun(nextRun);
@@ -580,6 +630,21 @@ function completeWriteRun(deps: RuntimeFlowDeps, commandId: string, run: RunReco
     createdAt: updatedAt,
   });
   return { type: "ack", commandId, success: true, runId: run.runId };
+}
+
+function assertRunThreadBinding(run: RunRecord, threadId: string): void {
+  // submit / approve 只能操作所属线程的 run，避免跨线程串改状态。
+  if (run.threadId !== threadId) {
+    throw new InkOSError("COMMAND.THREAD_MISMATCH", "threadId 与 run 绑定关系不匹配。", { statusCode: 400 });
+  }
+}
+
+function requireThreadBookId(thread: ThreadRecord, actionLabel: string): string {
+  // 历史上的 book_001 回退会把写操作落到错误书籍上，这里直接拒绝无 bookId 的上下文。
+  if (!thread.bookId) {
+    throw new InkOSError("COMMAND.BOOK_CONTEXT_REQUIRED", `${actionLabel} 需要绑定 bookId 的线程上下文。`, { statusCode: 400 });
+  }
+  return thread.bookId;
 }
 
 function submitBookCreateForm(

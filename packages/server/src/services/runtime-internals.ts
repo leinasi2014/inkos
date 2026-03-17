@@ -1,4 +1,4 @@
-import type { ChapterAuditRecord, DraftArtifact, RunRecord, SkillRef, ToolAction, ToolPresentation } from "../contracts.js";
+import type { ChapterAuditRecord, DraftArtifact, ResourceRecord, RunRecord, SkillRef, ToolAction, ToolPresentation } from "../contracts.js";
 import { InkOSError } from "../errors.js";
 import { createId, nowIso, weakEtag } from "../id.js";
 
@@ -18,6 +18,8 @@ export function createRunRecord(
   return {
     runId: createId("run"),
     threadId,
+    ...(input.bookId ? { bookId: input.bookId } : {}),
+    ...(input.chapterNumber ? { chapterNumber: input.chapterNumber } : {}),
     status: input.status,
     startedAt: nowIso(),
     ...(input.endedAt ? { endedAt: input.endedAt } : {}),
@@ -35,7 +37,17 @@ export function createRunRecord(
   };
 }
 
-export function createToolPresentation(runId: string, toolName: string, previewPayload: unknown, actions: ToolAction[]): ToolPresentation {
+type ToolPresentationOptions = {
+  readonly resourceRef?: NonNullable<ToolPresentation["resourceRef"]>;
+};
+
+export function createToolPresentation(
+  runId: string,
+  toolName: string,
+  previewPayload: unknown,
+  actions: ToolAction[],
+  options?: ToolPresentationOptions,
+): ToolPresentation {
   return {
     toolEventId: createId("tool"),
     runId,
@@ -46,9 +58,17 @@ export function createToolPresentation(runId: string, toolName: string, previewP
     skillId: toolName.split(".")[0] ?? "chief",
     skillVersion: "1.0.0",
     ...(toolName === "chief.plan" ? { upgradeHint: "chief" as const } : {}),
-    ...(toolName === "chief.approval-request"
-      ? { resourceRef: { refId: "res_audit_001", type: "text" as const, uri: "/api/v1/resources/res_audit_001" } }
-      : {}),
+    ...(options?.resourceRef ? { resourceRef: options.resourceRef } : {}),
+  };
+}
+
+export function createTextResource(content: string, refId = createId("res")): ResourceRecord {
+  return {
+    refId,
+    type: "text",
+    uri: `/api/v1/resources/${refId}`,
+    content,
+    createdAt: nowIso(),
   };
 }
 
@@ -201,6 +221,8 @@ export function hydrateRunToolPresentations(run: RunRecord): RunRecord {
   if (run.runId === "run_write_001") {
     return {
       ...run,
+      ...(run.bookId ? {} : { bookId: "book_001" }),
+      ...(run.chapterNumber ? {} : { chapterNumber: 12 }),
       toolPresentations: [
         {
           toolEventId: "tool_trace_001",
@@ -208,6 +230,7 @@ export function hydrateRunToolPresentations(run: RunRecord): RunRecord {
           toolName: "chief.worker-trace",
           toolSchemaVersion: "1.0.0",
           previewPayload: {
+            chapterNumber: 12,
             progress: 72,
             checkpoints: [
               { label: "Writer", status: "completed" },
@@ -226,6 +249,7 @@ export function hydrateRunToolPresentations(run: RunRecord): RunRecord {
           toolName: "chief.approval-request",
           toolSchemaVersion: "1.0.0",
           previewPayload: {
+            chapterNumber: 12,
             title: "是否按修订建议继续第13章？",
             blockedBy: "第12章人物位置和阵纹触发时序存在冲突，若直接续写会扩大返工范围。",
             riskLevel: "medium",

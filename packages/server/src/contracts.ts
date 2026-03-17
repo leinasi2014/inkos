@@ -62,6 +62,9 @@ export type RunError = z.infer<typeof RunErrorSchema>;
 export const RunRecordSchema = z.object({
   runId: z.string().min(1),
   threadId: z.string().min(1),
+  // 写作 / 审计 run 需要显式绑定章节，读模型不能再靠“最近一次 run”猜测。
+  bookId: z.string().min(1).optional(),
+  chapterNumber: z.number().int().positive().optional(),
   status: RunStatusSchema,
   startedAt: z.string().min(1),
   endedAt: z.string().optional(),
@@ -148,7 +151,8 @@ export const ChapterRecordSchema = z.object({
   chapterNumber: z.number().int().positive(),
   title: z.string().min(1),
   status: z.string().min(1),
-  wordCount: z.number().int().positive(),
+  // 初始化占位章节允许 0 字，契约不能比真实数据更窄。
+  wordCount: z.number().int().nonnegative(),
   auditStatus: z.string().min(1),
   content: z.string().min(1),
   createdAt: z.string().min(1),
@@ -285,7 +289,6 @@ export type SkillStatus = z.infer<typeof SkillStatusSchema>;
 export const SettingsOverviewSchema = z.object({
   llm: z.object({
     provider: z.string().min(1),
-    baseUrl: z.string().min(1),
     model: z.string().min(1),
     fallbackModel: z.string().min(1),
     hasApiKey: z.boolean(),
@@ -300,6 +303,23 @@ export const SettingsOverviewSchema = z.object({
   ),
 });
 export type SettingsOverview = z.infer<typeof SettingsOverviewSchema>;
+
+export const ProtectedSettingsOverviewSchema = z.object({
+  llm: z.object({
+    provider: z.string().min(1),
+    baseUrl: z.string().min(1),
+    model: z.string().min(1),
+    fallbackModel: z.string().min(1),
+    hasApiKey: z.boolean(),
+  }),
+  runtime: z.array(
+    z.object({
+      label: z.string().min(1),
+      value: z.string().min(1),
+    }),
+  ),
+});
+export type ProtectedSettingsOverview = z.infer<typeof ProtectedSettingsOverviewSchema>;
 
 const BaseCommandEnvelopeSchema = z.object({
   type: z.literal("command"),
@@ -324,7 +344,7 @@ export const CommandEnvelopeSchema = z.union([
     }),
   }),
   BaseCommandEnvelopeSchema.extend({
-    command: z.enum(["approve_action", "cancel_action"]),
+    command: z.enum(["approve_action", "reject_action", "cancel_action"]),
     payload: z.object({
       threadId: z.string().min(1),
       runId: z.string().min(1),
@@ -332,11 +352,27 @@ export const CommandEnvelopeSchema = z.union([
     }),
   }),
   BaseCommandEnvelopeSchema.extend({
-    command: z.enum(["apply_draft", "discard_draft", "regenerate_draft"]),
+    command: z.literal("apply_draft"),
     payload: z.object({
       draftId: z.string().min(1),
-      revision: z.number().int().positive().optional(),
-      etag: z.string().optional(),
+      revision: z.number().int().positive(),
+      etag: z.string().min(1),
+    }),
+  }),
+  BaseCommandEnvelopeSchema.extend({
+    command: z.literal("discard_draft"),
+    payload: z.object({
+      draftId: z.string().min(1),
+      revision: z.number().int().positive(),
+      etag: z.string().min(1),
+    }),
+  }),
+  BaseCommandEnvelopeSchema.extend({
+    command: z.literal("regenerate_draft"),
+    payload: z.object({
+      draftId: z.string().min(1),
+      revision: z.number().int().positive(),
+      etag: z.string().min(1),
       instruction: z.string().optional(),
     }),
   }),
@@ -359,6 +395,9 @@ export const CommandEnvelopeSchema = z.union([
     command: z.literal("resume"),
     payload: z.object({
       lastCursor: z.number().int().nonnegative(),
+      threadIds: z.array(z.string().min(1)).optional(),
+      // replay 必须分页，避免首次恢复时把整个历史一次性打爆 websocket。
+      limit: z.number().int().positive().max(200).optional(),
     }),
   }),
 ]);
@@ -370,6 +409,7 @@ export interface AckEnvelope {
   readonly commandId: string;
   readonly success: true;
   readonly runId?: string;
+  readonly nextCursor?: number;
 }
 
 export interface EventEnvelope {

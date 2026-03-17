@@ -20,17 +20,11 @@ async function main(): Promise<void> {
   });
   await app.register(websocket);
   await registerRestRoutes(app, runtime, config);
-  await registerWebsocketTransport(app, runtime);
+  await registerWebsocketTransport(app, runtime, config);
 
   app.get("/", async () => ({
+    ok: true,
     name: "@actalk/inkos-server",
-    mode: config.mode,
-    llm: {
-      provider: config.llm.provider,
-      baseUrl: config.llm.baseUrl,
-      model: config.llm.model,
-      hasApiKey: Boolean(config.llm.apiKey),
-    },
   }));
 
   await app.listen({ host: config.host, port: config.port });

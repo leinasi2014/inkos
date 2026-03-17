@@ -7,6 +7,7 @@ import { subscribeToEvents } from "./ws-client";
 interface UseLiveEventsOptions {
   enabled?: boolean;
   initialCursor?: number;
+  threadIds?: string[];
   isRelevant?: (event: EventEnvelope) => boolean;
   onEvent: (event: EventEnvelope) => void;
   onError?: (error: Error) => void;
@@ -15,6 +16,7 @@ interface UseLiveEventsOptions {
 export function useLiveEvents({
   enabled = true,
   initialCursor = 0,
+  threadIds,
   isRelevant,
   onEvent,
   onError,
@@ -31,8 +33,10 @@ export function useLiveEvents({
 
   useEffect(() => {
     if (!enabled) return undefined;
+    const nextThreadIds = threadIds ?? [];
     return subscribeToEvents({
       lastCursor: initialCursor,
+      threadIds: nextThreadIds,
       onEvent: (event) => {
         if (isRelevantRef.current && !isRelevantRef.current(event)) return;
         onEventRef.current(event);
@@ -41,5 +45,5 @@ export function useLiveEvents({
         onErrorRef.current?.(error);
       },
     });
-  }, [enabled, initialCursor]);
+  }, [enabled, initialCursor, (threadIds ?? []).join("|")]);
 }

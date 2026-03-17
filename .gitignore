@@ -18,6 +18,9 @@ output
 # AI review notes
 gemini-review.txt
 
+# Claude Code local data
+.claude/
+
 # Next.js
 .next/
 *.tsbuildinfo

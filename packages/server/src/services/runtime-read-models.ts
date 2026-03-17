@@ -5,11 +5,13 @@ import type {
   ChapterAuditFinding,
   ChapterAuditRecord,
   ChapterAuditTrace,
+  ProtectedSettingsOverview,
   SettingsOverview,
 } from "../contracts.js";
 import type { ServerConfig } from "../config.js";
 import type { DatabaseStore } from "../store/database.js";
 import { countTruthIssues } from "./book-derived-state.js";
+import { hydrateRunToolPresentations } from "./runtime-internals.js";
 
 function formatQueueItemLabel(threadTitle: string): string {
   return threadTitle.replace(/\s*\/\s*/g, " / ").trim();
@@ -206,14 +208,38 @@ function extractAuditTrace(checkpoints: unknown, notes: unknown, runStatus: stri
   return traceItems;
 }
 
+function isPersistedAuditStatus(value: string): value is ChapterAuditRecord["status"] {
+  return value === "passed" || value === "pending" || value === "failed" || value === "awaiting_approval";
+}
+
+function resolveAuditStatus(chapterAuditStatus: string, runStatus: string): ChapterAuditRecord["status"] {
+  // 章节表是持久化真相源，读模型优先信它，避免已通过的审计被回退成 pending。
+  if (isPersistedAuditStatus(chapterAuditStatus)) {
+    return chapterAuditStatus;
+  }
+  if (runStatus === "awaiting_approval") return "awaiting_approval";
+  if (runStatus === "failed") return "failed";
+  return "pending";
+}
+
+function findRunChapterBinding(run: { chapterNumber?: number; toolPresentations: Array<{ previewPayload?: unknown }> }, chapterNumber: number): boolean {
+  if (run.chapterNumber === chapterNumber) return true;
+  return run.toolPresentations.some((item) => {
+    const preview = item.previewPayload as Record<string, unknown> | undefined;
+    return typeof preview?.chapterNumber === "number" && preview.chapterNumber === chapterNumber;
+  });
+}
+
 export function buildChapterAuditRecord(store: DatabaseStore, bookId: string, chapterNumber: number): ChapterAuditRecord | null {
   const threads = store.listThreads({ bookId });
   const writeThread = threads.find((thread) => thread.threadId.includes("write"));
-  if (!writeThread?.lastRunId) return null;
-
-  const run = store.getRun(writeThread.lastRunId);
   const chapter = store.getChapter(bookId, chapterNumber);
-  if (!run || !chapter) return null;
+  if (!writeThread || !chapter) return null;
+
+  const boundRun = store.findLatestRunForChapter(bookId, chapterNumber)
+    ?? store.listRunsByThread(writeThread.threadId).find((run) => findRunChapterBinding(run, chapterNumber));
+  const run = boundRun ? hydrateRunToolPresentations(boundRun) : null;
+  if (!run) return null;
 
   const traceTool = run.toolPresentations.find((item) => item.toolName === "chief.worker-trace");
   const approvalTool = run.toolPresentations.find((item) => item.toolName === "chief.approval-request");
@@ -221,16 +247,17 @@ export function buildChapterAuditRecord(store: DatabaseStore, bookId: string, ch
   const resourceText = resourceRef ? store.getResource(resourceRef.refId)?.content ?? "" : "";
   const preview = (approvalTool?.previewPayload as Record<string, unknown> | undefined) ?? {};
   const blockedBy = String(preview.blockedBy ?? (resourceText || chapter.auditStatus));
+  const status = resolveAuditStatus(chapter.auditStatus, run.status);
 
   const findings: ChapterAuditFinding[] = [
     {
       title: "章节审计状态",
-      severity: chapter.auditStatus === "failed" ? "danger" : chapter.auditStatus === "pending" ? "warning" : "info",
-      detail: `第 ${chapter.chapterNumber} 章当前标记为 ${chapter.auditStatus}。`,
+      severity: status === "failed" ? "danger" : status === "passed" ? "info" : "warning",
+      detail: `第 ${chapter.chapterNumber} 章当前标记为 ${status}。`,
     },
     {
       title: "阻塞点",
-      severity: run.status === "awaiting_approval" ? "warning" : "info",
+      severity: status === "awaiting_approval" || status === "failed" ? "warning" : "info",
       detail: blockedBy,
     },
   ];
@@ -247,10 +274,16 @@ export function buildChapterAuditRecord(store: DatabaseStore, bookId: string, ch
     bookId,
     chapterNumber,
     sourceRunId: run.runId,
-    status: chapter.auditStatus === "failed" ? "failed" : run.status === "awaiting_approval" ? "awaiting_approval" : "pending",
+    status,
     summary: run.summary,
     blockedBy,
-    nextAction: run.status === "awaiting_approval" ? "回到 /chief 决定是否按修订建议继续。" : "继续观察后续审计回写。",
+    nextAction: status === "passed"
+      ? "审计已通过，可以继续推进下一章或回看本章落库结果。"
+      : status === "awaiting_approval"
+        ? "回到 /chief 决定是否按修订建议继续。"
+        : status === "failed"
+          ? "回到 /chief 处理阻塞点后，再重新发起下一轮写作。"
+          : "继续观察后续审计回写。",
     findings,
     trace: extractAuditTrace(
       (traceTool?.previewPayload as Record<string, unknown> | undefined)?.checkpoints,
@@ -283,7 +316,6 @@ export function buildSettingsOverview(store: DatabaseStore, config: ServerConfig
   return {
     llm: {
       provider: config.llm.provider,
-      baseUrl: config.llm.baseUrl,
       model: config.llm.model,
       fallbackModel: "glm-4.7",
       hasApiKey: Boolean(config.llm.apiKey),
@@ -296,9 +328,28 @@ export function buildSettingsOverview(store: DatabaseStore, config: ServerConfig
     skills: Array.from(skills.values()).sort((left, right) => left.skillId.localeCompare(right.skillId)),
     advanced: [
       { label: "审批模式", value: "risk-gated" },
+      { label: "WebSocket", value: "受本地 token 保护" },
+      { label: "内部配置", value: "移至受保护接口" },
+      { label: "服务边界", value: "设置页只展示公开运行信息" },
+    ],
+  };
+}
+
+export function buildProtectedSettingsOverview(config: ServerConfig): ProtectedSettingsOverview {
+  return {
+    llm: {
+      provider: config.llm.provider,
+      baseUrl: config.llm.baseUrl,
+      model: config.llm.model,
+      fallbackModel: "glm-4.7",
+      hasApiKey: Boolean(config.llm.apiKey),
+    },
+    runtime: [
       { label: "数据库", value: config.databasePath },
-      { label: "WebSocket", value: "/ws" },
       { label: "服务模式", value: config.mode },
+      { label: "WebSocket", value: "/ws" },
+      { label: "Host", value: config.host },
+      { label: "Port", value: String(config.port) },
     ],
   };
 }

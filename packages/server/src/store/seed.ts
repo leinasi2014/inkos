@@ -136,6 +136,8 @@ export function createSeedData(): SeedData {
       {
         runId: "run_write_001",
         threadId: "thread_book_001_write",
+        bookId: "book_001",
+        chapterNumber: 12,
         status: "awaiting_approval",
         startedAt: now,
         currentStepId: "approval_gate",
@@ -156,6 +158,7 @@ export function createSeedData(): SeedData {
             toolName: "chief.worker-trace",
             toolSchemaVersion: "1.0.0",
             previewPayload: {
+              chapterNumber: 12,
               progress: 72,
               checkpoints: [
                 { label: "Writer", status: "completed" },
@@ -174,6 +177,7 @@ export function createSeedData(): SeedData {
             toolName: "chief.approval-request",
             toolSchemaVersion: "1.0.0",
             previewPayload: {
+              chapterNumber: 12,
               title: "是否按修订建议继续第13章？",
               blockedBy: "第12章人物位置和阵纹触发时序存在冲突，若直接续写会扩大返工范围。",
               riskLevel: "medium",
@@ -321,7 +325,8 @@ export function createSeedData(): SeedData {
         type: "location",
         name: "万坠断崖",
         status: "applied",
-        sourceRunId: "run_truth_sync_001",
+        // foreign_keys 打开后，seed 里的来源 run 也必须是真实存在的记录。
+        sourceRunId: "run_write_001",
         sourceThreadId: "thread_book_001_write",
         provenance: "materials_summary.md",
         note: "卷二关键交锋地点。",
